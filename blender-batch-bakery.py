@@ -3,62 +3,69 @@ from datetime import datetime
 import os
 
 def bake_texture(obj, width, height, bake_type, img_format):
-    print("OBJECT BAKING: ", obj.name)
-    now = datetime.now()
+
     image_name = obj.name + '_bake'
     img = bpy.data.images.new(image_name,width,height)
     
+    # delete texture node if it already exists
     for mat in obj.data.materials:
         for n in mat.node_tree.nodes:
             if n.name == 'Bake_node':
                 mat.node_tree.nodes.remove(n)
 
+    # for each material make a copy to avoid baking materials that are used on
+    # multiple objects and therefore make a mess. for each mat create a texture node
     for ma in obj.data.materials:
         mat = ma.copy()
         mat.use_nodes = True
         nodes = mat.node_tree.nodes
         texture_node =nodes.new('ShaderNodeTexImage')
+        texture_node.location = (-700, 400)
         texture_node.name = 'Bake_node'
         texture_node.select = True
         nodes.active = texture_node
         texture_node.image = img
         
-
+    # baking that texture baby
     bpy.context.view_layer.objects.active = obj
     obj.active_material = mat
     bpy.ops.object.bake(type=bake_type,save_mode='EXTERNAL')
         
+    # build path to save the textyure
     path = os.path.join(bpy.path.abspath("//"), 'bakes')
     if not os.path.exists(path):
         os.makedirs(path)
     path = os.path.join(path, image_name+img_format)
 
     img.save_render(filepath=path)
-
-    for mat in obj.data.materials:
-        for n in mat.node_tree.nodes:
-            if n.name == 'Bake_node':
-                output = mat.node_tree.nodes.get('Material Output')
-                mat.node_tree.links.new(n.outputs[0], output.inputs[0])
-                
-    print("BAKED. TIME TAKEN: ", datetime.now() - now)
-
+        
 
 def recursive_baking(object, width, height, bake_type, img_format):
+    
+    # deselect everything, better safe than sorry
     bpy.ops.object.select_all(action='DESELECT')
+    
+    # mesh without any children and at least a material => bake
     if object.type == "MESH" and len(object.children) == 0 and len(object.data.materials.items()) > 0:
         object.select_set(True)
         bake_texture(object, width, height, bake_type, img_format)
+
+    # obj with children
     for obj in object.children:
+        # obj with children => recursive call
         if len(obj.children) > 0:
             recursive_baking(obj, width, height, bake_type, img_format)
+        # mesh with at least a material => bake
         if obj.type == "MESH" and len(obj.data.materials.items()) > 0:
             obj.select_set(True)
             bake_texture(obj, width, height, bake_type, img_format)
 
         
-def recursive_connecting(object, img_format):
+def recursive_connecting(object, img_format, ao_gltf_export):
+    
+    # deselect everything, better safe than sorry
     bpy.ops.object.select_all(action='DESELECT')
+    
     if object.type == "MESH" and len(object.children) == 0 and len(object.data.materials.items()) > 0:
         object.select_set(True)
         connect(object, img_format)
@@ -69,38 +76,48 @@ def recursive_connecting(object, img_format):
             obj.select_set(True)
             connect(obj, img_format)
 
-def connect(obj, img_format):
+
+def connect(obj, img_format, ao_gltf_export):
     print("CONNECTED: ", obj.name)
     for mat in obj.data.materials:
         for n in mat.node_tree.nodes:
             if n.name == 'Bake_node':
-                output = mat.node_tree.nodes.get('Material Output')
                 
+                # build path
                 image_name = obj.name + '_bake'
                 path = os.path.join(bpy.path.abspath("//"), 'bakes')
                 if not os.path.exists(path):
                     os.makedirs(path)
                 path = os.path.join(path, image_name+img_format)
 
+                # load image
                 img = bpy.data.images.load(path, check_existing=True)
                 n.image = img
                 
-                mat.node_tree.links.new(n.outputs[0], output.inputs[0])
-                
+                # if on, connec texture to Occlusion group node
+                if (ao_gltf_export == True) :
+                    group = bpy.data.node_groups.new(type="ShaderNodeTree", name="GLTF Settings")
+                    group.inputs.new("NodeSocketFloat", "Occlusion")
+                    input_node = group.nodes.new("NodeGroupInput")
+                    
+                    tree = bpy.context.object.active_material.node_tree
+                    group_node = tree.nodes.new("ShaderNodeGroup")
+                    group_node.node_tree = group
+                    group_node.location = (-300, 400)
+                    
+                    mat.node_tree.links.new(n.outputs[0], group_node.inputs[0])
+                # else connect texture to material output
+                else:
+                    output = mat.node_tree.nodes.get('Material Output')
+                    bake = mat.node_tree.nodes.get('Bake_node')
+                    mat.node_tree.links.new(bake.outputs[0], output.inputs[0])
+
+
+# select entire hierarchy to export it         
 def select_hierarchy(object):
     object.select_set(True)
     for obj in object.children:
         select_hierarchy(obj)
-
-
-#obj = bpy.context.active_object
-#recursive_baking(obj)
-#recursive_connecting(obj)
-#bpy.ops.object.select_all(action='DESELECT')
-#select_hierarchy(obj)
-#bpy.ops.export_scene.gltf(filepath='//baked_glbs/'+obj.name+'.glb', export_format='GLB', use_selection=True)
-
-
 
 
 
@@ -109,7 +126,7 @@ bl_info = {
     "name": "Baking Plug-in",
     "description": "Bake entire hierarchies of objects all in one click",
     "author": "elia",
-    "version": (0, 0, 1),
+    "version": (0, 1, 0),
     "blender": (2, 80, 0),
     "location": "3D View > Tools",
     "warning": "",
@@ -117,7 +134,6 @@ bl_info = {
     "tracker_url": "",
     "category": "Development"
 }
-
 
 import bpy
 
@@ -142,19 +158,16 @@ from bpy.types import (Panel,
 
 class MyProperties(PropertyGroup):
 
-#    my_bool: BoolProperty(
-#        name="Enable or Disable",
-#        description="A bool property",
-#        default = False
-#        )
-
-#    my_int: IntProperty(
-#        name = "Int Value",
-#        description="A integer property",
-#        default = 23,
-#        min = 10,
-#        max = 100
-#        )
+    ao_gltf_export: BoolProperty(
+        name="Export AO for GLTF",
+        description="Select this to export the AO for GLTF files",
+        default = False
+        )
+    bake_selected: BoolProperty(
+        name="Bake all selected objects",
+        description="Select this to bake all the selected objects separately. If not selected, only the active obj will be baked",
+        default = True
+        )
     texture_width: IntProperty(
         name = "Width",
         description="width of the texture",
@@ -168,32 +181,7 @@ class MyProperties(PropertyGroup):
         default = 2048,
         min = 8,
         max = 10000
-        )
-
-#    my_float: FloatProperty(
-#        name = "Float Value",
-#        description = "A float property",
-#        default = 23.7,
-#        min = 0.01,
-#        max = 30.0
-#        )
-
-#    my_float_vector: FloatVectorProperty(
-#        name = "Float Vector Value",
-#        description="Something",
-#        default=(0.0, 0.0, 0.0), 
-#        min= 0.0, # float
-#        max = 0.1
-#    ) 
-
-#    my_path: StringProperty(
-#        name = "Directory",
-#        description="Choose a directory:",
-#        default="",
-#        maxlen=1024,
-#        subtype='DIR_PATH'
-#        )
-#        
+        )      
     bake_type: EnumProperty(
         name="",
         description="bake type",
@@ -205,7 +193,6 @@ class MyProperties(PropertyGroup):
                 ('SHADOW', "Shadow", "")
                ]
         )
-
     img_format: EnumProperty(
         name="",
         description="file extension of texture images",
@@ -226,32 +213,45 @@ class WM_OT_HelloWorld(Operator):
         scene = context.scene
         mytool = scene.my_tool
 
-#        print("bool state:", mytool.my_bool)
-#        print("int value:", mytool.my_int)
-#        print("float value:", mytool.my_float)
-#        print("string value:", mytool.my_string)
-#        print("enum state:", mytool.my_enum)
-
         self.report({'INFO'}, "Started Baking")
         
         texture_width = mytool.texture_width
         texture_height = mytool.texture_height
         bake_type = mytool.bake_type
         img_format = mytool.img_format
+        bake_selected = mytool.bake_selected
+        ao_gltf_export = mytool.ao_gltf_export
 
-        obj = bpy.context.active_object
-        recursive_baking(obj, texture_width, texture_height, bake_type, img_format)
-        recursive_connecting(obj, img_format)
-        bpy.ops.object.select_all(action='DESELECT')
-        select_hierarchy(obj)
-        
-        path = os.path.join(bpy.path.abspath("//"), 'baked_glbs')
-        if not os.path.exists(path):
-            os.makedirs(path)
-        path = os.path.join(path, obj.name+'.glb')
-        bpy.ops.export_scene.gltf(filepath=path, export_format='GLB', use_selection=True)
-        
-        self.report({'INFO'}, "Finished Baking")
+        # bake selected objects
+        if (bake_selected):
+            for obj in bpy.context.selected_objects:
+                # bake, connect, deselect all and select entire hierarchy
+                recursive_baking(obj, texture_width, texture_height, bake_type, img_format)
+                recursive_connecting(obj, img_format, ao_gltf_export)
+                bpy.ops.object.select_all(action='DESELECT')
+                select_hierarchy(obj)
+                
+                # build path
+                path = os.path.join(bpy.path.abspath("//"), 'baked_glbs')
+                if not os.path.exists(path):
+                    os.makedirs(path)
+                path = os.path.join(path, obj.name+'.glb')
+                
+                #export as glb
+                bpy.ops.export_scene.gltf(filepath=path, export_format='GLB', use_selection=True)
+        # bake only active object
+        else:
+            obj = bpy.context.active_object
+            recursive_baking(obj, texture_width, texture_height, bake_type, img_format)
+            recursive_connecting(obj, img_format, ao_gltf_export)
+            bpy.ops.object.select_all(action='DESELECT')
+            select_hierarchy(obj)
+            
+            path = os.path.join(bpy.path.abspath("//"), 'baked_glbs')
+            if not os.path.exists(path):
+                os.makedirs(path)
+            path = os.path.join(path, obj.name+'.glb')
+            bpy.ops.export_scene.gltf(filepath=path, export_format='GLB', use_selection=True)
 
         return {'FINISHED'}
 
@@ -276,11 +276,11 @@ class OBJECT_MT_CustomMenu(bpy.types.Menu):
 # ------------------------------------------------------------------------
 
 class OBJECT_PT_CustomPanel(Panel):
-    bl_label = "HoR baking plugin"
+    bl_label = "Blender Batch Bakery"
     bl_idname = "OBJECT_PT_custom_panel"
     bl_space_type = "VIEW_3D"   
     bl_region_type = "UI"
-    bl_category = "Baking Plugin"
+    bl_category = "BBB"
     bl_context = "objectmode"   
 
 
@@ -295,9 +295,6 @@ class OBJECT_PT_CustomPanel(Panel):
         
         layout.label(text="TEXTURE SIZES")
 
-#        layout.prop(mytool, "my_bool")
-#        layout.prop(mytool, "my_enum", text="") 
-#        layout.prop(mytool, "my_int")
         layout.prop(mytool, "texture_width")
         layout.prop(mytool, "texture_height")
         layout.separator()
@@ -306,13 +303,12 @@ class OBJECT_PT_CustomPanel(Panel):
         layout.separator()
         layout.label(text="TEXTURE FORMAT")
         layout.prop(mytool, "img_format")
-#        layout.prop(mytool, "my_float")
-#        layout.prop(mytool, "my_float_vector", text="")
-#        layout.prop(mytool, "my_string")
-#        layout.prop(mytool, "my_path")
+        layout.separator()
+        layout.prop(mytool, "bake_selected")
+        layout.separator()
+        layout.prop(mytool, "ao_gltf_export")
         layout.separator()
         layout.operator("wm.hello_world")
-#        layout.menu(OBJECT_MT_CustomMenu.bl_idname, text="Presets", icon="SCENE")
         layout.separator()
 
 # ------------------------------------------------------------------------
